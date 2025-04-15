@@ -1,211 +1,195 @@
-// server.js - Web Push Notification Server
+// server.js - Tracking Server for Vercel Navigation Experiment
 const express = require('express');
-const webpush = require('web-push');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const path = require('path');
+const webpush = require('web-push');
 const fs = require('fs');
+const path = require('path');
 
 // Create Express app
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// Configure CORS - this is crucial for GitHub Pages to communicate with your server
+// Configure CORS to allow requests from any origin
 app.use(cors({
-  origin: '*', // For testing, allow all origins
+  origin: '*', // For testing - in production, restrict to your domains
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Use body parser for JSON requests
+// Body parser middleware
 app.use(bodyParser.json());
 
-// VAPID keys provided by you
+// VAPID keys for web push notifications
+// In production, use environment variables
 const vapidKeys = {
   publicKey: 'BG1NfrHDgwEIxe4ACqecfs0wB0T2v1DaTE45MgzZU4bovjnGKww8eSv-R8r68W_LmV3WTIzccK01C2FCwM55CLQ',
   privateKey: '2HrMeZ2iXu2dzRG0J6XMqNZ6ZpH504RSEou9ZpCxALY'
 };
 
-// Configure web-push with your VAPID keys
+// Configure web-push
 webpush.setVapidDetails(
-  'mailto:test@example.com', // Change to your email
+  'mailto:youremail@example.com', // Change to your email
   vapidKeys.publicKey,
   vapidKeys.privateKey
 );
 
-// In-memory store for subscriptions (would use a database in production)
+// In-memory store for subscriptions and logs
 const subscriptions = [];
-
-// Create a subscription log to track who subscribes
-const logSubscription = (subscription, origin) => {
-  const logEntry = {
-    endpoint: subscription.endpoint,
-    origin: origin,
-    timestamp: new Date().toISOString()
-  };
-  
-  subscriptions.push(logEntry);
-  console.log('New subscription:', logEntry);
-  
-  // Log to a file as well
-  try {
-    const logPath = path.join(__dirname, 'subscription_log.json');
-    let logs = [];
-    
-    if (fs.existsSync(logPath)) {
-      const data = fs.readFileSync(logPath, 'utf8');
-      logs = JSON.parse(data);
-    }
-    
-    logs.push(logEntry);
-    fs.writeFileSync(logPath, JSON.stringify(logs, null, 2));
-  } catch (error) {
-    console.error('Error writing to log file:', error);
-  }
-  
-  return logEntry;
-};
+const navigationLogs = [];
+const subscriptionLogs = [];
 
 // Routes
-// Serve the VAPID public key
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.send('Tracking Server is running');
+});
+
+// Serve VAPID public key
 app.get('/vapidPublicKey', (req, res) => {
   res.json({ publicKey: vapidKeys.publicKey });
 });
 
-// Subscribe endpoint
+// Subscribe to push notifications
 app.post('/subscribe', (req, res) => {
   const subscription = req.body.subscription;
-  const origin = req.headers.origin || req.body.origin || 'unknown';
+  const url = req.body.url || 'unknown';
+  const timestamp = req.body.timestamp || new Date().toISOString();
+  const userAgent = req.body.userAgent || 'unknown';
   
   if (!subscription) {
     return res.status(400).json({ error: 'Subscription object is required' });
   }
   
-  const logEntry = logSubscription(subscription, origin);
+  // Store subscription
+  subscriptions.push(subscription);
   
-  // Send a test notification immediately for confirmation
+  // Log subscription
+  const subscriptionLog = {
+    endpoint: subscription.endpoint,
+    url,
+    userAgent,
+    timestamp,
+    ip: req.ip, // IP address of the client
+    headers: req.headers,
+  };
+  
+  subscriptionLogs.push(subscriptionLog);
+  console.log('New subscription:', subscriptionLog);
+  
+  // Send a confirmation notification
   const payload = JSON.stringify({
     title: 'Subscription Successful',
     body: 'You have successfully subscribed to push notifications.',
     tag: 'welcome',
-    url: origin,
-    timestamp: new Date().toISOString()
+    data: {
+      url: url,
+      timestamp
+    }
   });
   
   webpush.sendNotification(subscription, payload)
     .then(() => {
-      console.log('Test notification sent successfully');
+      console.log('Welcome notification sent successfully');
       res.status(201).json({ 
         success: true, 
-        message: 'Subscription successful and test notification sent' 
+        message: 'Subscription successful and welcome notification sent' 
       });
     })
     .catch(error => {
-      console.error('Error sending test notification:', error);
+      console.error('Error sending welcome notification:', error);
       res.status(201).json({ 
         success: true, 
-        message: 'Subscription successful but test notification failed',
+        message: 'Subscription successful but welcome notification failed',
         error: error.message
       });
     });
 });
 
-// Send a notification to a specific subscription
-app.post('/send-notification', (req, res) => {
-  const { subscription, title, body, tag, url } = req.body;
+// Log navigation events
+app.post('/log-navigation', (req, res) => {
+  const { 
+    url, 
+    referrer, 
+    userAgent, 
+    subscriptionEndpoint, 
+    timestamp,
+    source 
+  } = req.body;
   
-  if (!subscription) {
-    return res.status(400).json({ error: 'Subscription object is required' });
+  // Create log entry
+  const navigationLog = {
+    url: url || 'unknown',
+    referrer: referrer || 'unknown',
+    userAgent: userAgent || req.get('User-Agent') || 'unknown',
+    subscriptionEndpoint: subscriptionEndpoint || 'not-subscribed',
+    timestamp: timestamp || new Date().toISOString(),
+    ip: req.ip, // IP address of the client
+    origin: req.headers.origin || 'unknown',
+    source: source || 'unknown'
+  };
+  
+  // Store in memory and log to console
+  navigationLogs.push(navigationLog);
+  console.log('Navigation event:', navigationLog);
+  
+  res.status(200).json({ success: true });
+});
+
+// Send a notification to all subscriptions
+app.post('/send-notification', (req, res) => {
+  const { title, body, url } = req.body;
+  
+  if (!title || !body) {
+    return res.status(400).json({ error: 'Title and body are required' });
+  }
+  
+  if (subscriptions.length === 0) {
+    return res.status(404).json({ error: 'No subscriptions found' });
   }
   
   const payload = JSON.stringify({
-    title: title || 'New Notification',
-    body: body || 'You have a new notification.',
-    tag: tag || 'default',
-    url: url || '/',
-    timestamp: new Date().toISOString()
+    title,
+    body,
+    tag: 'notification',
+    data: {
+      url: url || '/',
+      timestamp: new Date().toISOString()
+    }
   });
   
-  webpush.sendNotification(subscription, payload)
-    .then(() => {
-      console.log('Notification sent successfully');
-      res.status(200).json({ success: true });
-    })
-    .catch(error => {
-      console.error('Error sending notification:', error);
-      res.status(500).json({ 
-        error: 'Failed to send notification', 
-        details: error.message 
+  // Send notifications to all subscriptions
+  const sendPromises = subscriptions.map(subscription => {
+    return webpush.sendNotification(subscription, payload)
+      .catch(error => {
+        console.error('Error sending notification:', error);
+        return { error: error.message, endpoint: subscription.endpoint };
+      });
+  });
+  
+  Promise.all(sendPromises)
+    .then(results => {
+      res.status(200).json({
+        success: true,
+        sent: results.filter(result => !result.error).length,
+        failed: results.filter(result => result.error).length,
+        errors: results.filter(result => result.error)
       });
     });
 });
 
-// Endpoint to log navigation events
-app.post('/log-navigation', (req, res) => {
-  const { url, referrer, userAgent, subscriptionEndpoint } = req.body;
-  const timestamp = new Date().toISOString();
-  const origin = req.headers.origin || 'unknown';
-  
-  const logEntry = {
-    url,
-    referrer,
-    userAgent,
-    subscriptionEndpoint,
-    origin,
-    timestamp
-  };
-  
-  console.log('Navigation event:', logEntry);
-  
-  // Log to a file
-  try {
-    const logPath = path.join(__dirname, 'navigation_log.json');
-    let logs = [];
-    
-    if (fs.existsSync(logPath)) {
-      const data = fs.readFileSync(logPath, 'utf8');
-      logs = JSON.parse(data);
-    }
-    
-    logs.push(logEntry);
-    fs.writeFileSync(logPath, JSON.stringify(logs, null, 2));
-    
-    res.status(200).json({ success: true });
-  } catch (error) {
-    console.error('Error writing to log file:', error);
-    res.status(500).json({ error: 'Failed to log navigation' });
-  }
-});
-
-// Get all subscriptions (for testing only - would require authentication in production)
-app.get('/subscriptions', (req, res) => {
-  res.json(subscriptions);
-});
-
-// Get navigation logs (for testing only - would require authentication in production)
+// Get navigation logs
 app.get('/navigation-logs', (req, res) => {
-  try {
-    const logPath = path.join(__dirname, 'navigation_log.json');
-    
-    if (!fs.existsSync(logPath)) {
-      return res.json([]);
-    }
-    
-    const data = fs.readFileSync(logPath, 'utf8');
-    const logs = JSON.parse(data);
-    res.json(logs);
-  } catch (error) {
-    console.error('Error reading log file:', error);
-    res.status(500).json({ error: 'Failed to retrieve navigation logs' });
-  }
+  res.json(navigationLogs);
 });
 
-// Basic health check endpoint
-app.get('/', (req, res) => {
-  res.send('Push Notification Server is running');
+// Get subscription logs
+app.get('/subscription-logs', (req, res) => {
+  res.json(subscriptionLogs);
 });
 
 // Start the server
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`Tracking Server is running on port ${PORT}`);
 });
